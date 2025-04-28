@@ -1,0 +1,65 @@
+# Disable the Gradle daemon for Continuous Integration servers as correctness
+# is usually a priority over speed in CI environments. Using a fresh
+# runtime for each build is more reliable since the runtime is completely
+# isolated from any previous builds.
+image: gradle:8.2.0-jdk17-jammy
+
+variables:
+ GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+ SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"  # Defines the location of the analysis task cache
+ GIT_DEPTH: "0"
+ DOCKER_IMAGE: "colinfontysdocker/beeple-docker-hub"
+ DOCKER_REGISTRY: "docker.io"
+
+stages:
+ - build
+ - test
+ - sonarqube-check
+ - deploy
+
+build:
+ stage: build
+ script:
+  - ./gradlew assemble
+ artifacts:
+   paths:
+     - build/libs/beeple-0.0.3.SNAPSHOT.jar
+
+test:
+ stage: test
+ script:
+  - ./gradlew test
+
+sonarqube-check:
+  stage: sonarqube-check
+  
+  script:
+    - ./gradlew clean
+    - ./gradlew test jacocoTestReport sonar
+
+  allow_failure: false
+  rules:
+    - if: $CI_PIPELINE_SOURCE == 'merge_request_event'
+    - if: $CI_COMMIT_BRANCH == 'main'
+
+deploy:
+  stage: deploy
+  image: docker:24.0
+  services:
+    - docker:24.0-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo "Preparing Docker build context..."
+    - ./gradlew build
+  script:
+    - echo "Building Docker image..."
+    - docker login -u "$env:CI_REGISTRY_USER" -p "$env:CI_REGISTRY_PASSWORD" "$env:DOCKER_REGISTRY"
+    - docker build -t "${env:DOCKER_IMAGE}:${env:CI_COMMIT_SHORT_SHA}" .
+    - docker tag "${env:DOCKER_IMAGE}:${env:CI_COMMIT_SHORT_SHA}" "${env:DOCKER_IMAGE}:latest"
+    - docker push "${env:DOCKER_IMAGE}:${env:CI_COMMIT_SHORT_SHA}"
+    - docker push "${env:DOCKER_IMAGE}:latest"
+  rules:
+    - if: $CI_COMMIT_BRANCH == 'main'
+  dependencies:
+    - sonarqube-check
